@@ -207,7 +207,9 @@
 
   <script>
     const STORAGE_KEY = 'tiktok-assist-entries-v1';
-    let entries = loadEntries();
+    let entries = [];
+    let isLoading = true;
+    let loadError = '';
     let editingId = null;
 
     const $ = (selector) => document.querySelector(selector);
@@ -218,16 +220,53 @@
     const urlFields = $('#urlFields');
     const entryList = $('#entryList');
 
-    function loadEntries() {
-      try {
-        const value = JSON.parse(localStorage.getItem(STORAGE_KEY));
-        return Array.isArray(value) ? value : [];
-      } catch { return []; }
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: { 'content-type': 'application/json', ...(options.headers || {}) }
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || 'Something went wrong.');
+      return data;
     }
 
-    function saveEntries() {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+    async function refreshEntries({ migrate = false } = {}) {
+      isLoading = true;
+      loadError = '';
       renderEntries();
+      try {
+        let data = await api('/api/entries');
+        entries = data.entries;
+
+        if (migrate) {
+          let oldEntries = [];
+          try {
+            const value = JSON.parse(localStorage.getItem(STORAGE_KEY));
+            oldEntries = Array.isArray(value) ? value : [];
+          } catch {}
+
+          if (oldEntries.length) {
+            for (const entry of oldEntries) {
+              try {
+                await api('/api/entries', {
+                  method: 'POST',
+                  body: JSON.stringify({ id: entry.id, text: entry.text, urls: entry.urls })
+                });
+              } catch (error) {
+                if (!error.message.includes('already saved')) throw error;
+              }
+            }
+            localStorage.removeItem(STORAGE_KEY);
+            data = await api('/api/entries');
+            entries = data.entries;
+          }
+        }
+      } catch (error) {
+        loadError = error.message;
+      } finally {
+        isLoading = false;
+        renderEntries();
+      }
     }
 
     function normalizeTikTokUrl(value) {
@@ -299,6 +338,16 @@
       $('#entryCount').textContent = `${entries.length} message${entries.length === 1 ? '' : 's'}`;
       entryList.innerHTML = '';
 
+      if (isLoading) {
+        entryList.innerHTML = '<div class="empty"><strong>Loading messages…</strong>Fetching the latest saved data.</div>';
+        return;
+      }
+
+      if (loadError) {
+        entryList.innerHTML = '<div class="empty"><strong>Could not load messages</strong>Please refresh the page and try again.</div>';
+        return;
+      }
+
       if (!filtered.length) {
         const empty = document.createElement('div');
         empty.className = 'empty';
@@ -355,13 +404,18 @@
       entryForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
-    function deleteEntry(id) {
+    async function deleteEntry(id) {
       const entry = entries.find(item => item.id === id);
       if (!entry || !confirm('Delete this saved message?')) return;
-      entries = entries.filter(item => item.id !== id);
-      if (editingId === id) resetForm();
-      saveEntries();
-      toast('Message deleted');
+      try {
+        await api(`/api/entries/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        entries = entries.filter(item => item.id !== id);
+        if (editingId === id) resetForm();
+        renderEntries();
+        toast('Message deleted everywhere');
+      } catch (error) {
+        toast(error.message);
+      }
     }
 
     tabs.forEach(tab => tab.addEventListener('click', () => showScreen(tab.dataset.screen)));
@@ -369,7 +423,7 @@
     $('#cancelEdit').addEventListener('click', resetForm);
     $('#searchEntries').addEventListener('input', renderEntries);
 
-    entryForm.addEventListener('submit', (event) => {
+    entryForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       const urls = [...document.querySelectorAll('.url-input')].map(input => input.value.trim()).filter(Boolean);
       const normalized = urls.map(normalizeTikTokUrl);
@@ -383,25 +437,36 @@
         toast('The same video is listed twice');
         return;
       }
-      const clash = entries.find(entry => entry.id !== editingId && entry.urls.some(url => normalized.includes(normalizeTikTokUrl(url))));
-      if (clash) {
-        toast('One of those videos is already saved');
-        return;
+      const button = $('#saveButton');
+      button.disabled = true;
+      button.textContent = 'Saving…';
+      try {
+        if (editingId) {
+          const data = await api(`/api/entries/${encodeURIComponent(editingId)}`, {
+            method: 'PUT', body: JSON.stringify({ urls, text })
+          });
+          entries = entries.map(entry => entry.id === editingId ? data.entry : entry);
+          toast('Changes saved everywhere');
+        } else {
+          const data = await api('/api/entries', {
+            method: 'POST', body: JSON.stringify({ urls, text })
+          });
+          entries.unshift(data.entry);
+          toast('Message saved everywhere');
+        }
+        renderEntries();
+        resetForm();
+      } catch (error) {
+        toast(error.message);
+      } finally {
+        button.disabled = false;
+        button.textContent = editingId ? 'Save changes' : 'Save message';
       }
-
-      if (editingId) {
-        entries = entries.map(entry => entry.id === editingId ? { ...entry, urls, text, updatedAt: Date.now() } : entry);
-        toast('Changes saved');
-      } else {
-        entries.unshift({ id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`, urls, text, updatedAt: Date.now() });
-        toast('Message added');
-      }
-      saveEntries();
-      resetForm();
     });
 
-    $('#lookupForm').addEventListener('submit', (event) => {
+    $('#lookupForm').addEventListener('submit', async (event) => {
       event.preventDefault();
+      if (isLoading) await refreshEntries();
       const target = normalizeTikTokUrl($('#lookupUrl').value);
       const result = $('#result');
       const match = target && entries.find(entry => entry.urls.some(url => normalizeTikTokUrl(url) === target));
@@ -432,6 +497,7 @@
     addUrlField();
     renderEntries();
     if (location.hash === '#admin') showScreen('admin');
+    refreshEntries({ migrate: true });
   </script>
 </body>
 </html>

@@ -2,7 +2,8 @@
   "name": "tiktok-assist",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
-    "build": "mkdir -p dist && cp index.html dist/index.html"
+    "build": "node scripts/build.mjs"
   }
 }
